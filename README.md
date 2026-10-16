@@ -49,3 +49,7 @@ Or open `Package.swift` in Xcode and press ⌘R (choose the *Release* scheme for
 ## Limits
 
 Double-float has a ~48-bit mantissa. At about 2·10⁻¹⁵ units per pixel (≈10¹² zoom) neighbouring pixels are only a few ulps apart. The image turns noisy there, so the zoom stops and the HUD shows a warning. Going deeper would need perturbation theory.
+
+## Web version
+
+`web/index.html` is a single-file WebGL2 port with the same rendering approach. Open it in Safari, Chrome or Firefox, no build step. Browsers have no `fma` and no way to turn off GPU fast-math, so the double-float code multiplies every rounded intermediate by a uniform equal to 1 at runtime, and the page runs a small self-test at startup. If the GPU compiler still breaks the maths, the panel says so and zoom stops at the FP32 limit.
