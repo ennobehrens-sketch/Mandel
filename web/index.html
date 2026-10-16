@@ -10,8 +10,8 @@
     --line: rgba(150, 168, 220, 0.18);
     --fg: #e8ebf5;
     --muted: #8a92ae;
-    --cool: #5a9be6;        /* FP32 — the palette's blue */
-    --warm: #ffaa1d;        /* DF64 and active controls — the palette's orange */
+    --cool: #5a9be6;        /* direct FP32 — the palette's blue */
+    --warm: #ffaa1d;        /* perturbation and active controls — the palette's orange */
     --warn: #ff7a66;
     --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     --label: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, -apple-system, sans-serif;
@@ -41,8 +41,10 @@
     position: fixed;
     top: calc(12px + env(safe-area-inset-top, 0px));
     left: calc(12px + env(safe-area-inset-left, 0px));
-    width: 304px;
+    width: 316px;
     max-width: calc(100vw - 24px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+    max-height: calc(100% - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    overflow-y: auto;
     box-sizing: border-box;
     display: grid;
     gap: 12px;
@@ -75,8 +77,7 @@
     border: 1px solid currentColor;
     color: var(--cool);
   }
-  .pill.df { color: var(--warm); }
-  .pill.off { color: var(--warn); }
+  .pill.deep { color: var(--warm); }
 
   .stats {
     margin: 0;
@@ -101,11 +102,24 @@
   }
   .stats dd small { color: var(--muted); font-size: 10.5px; }
 
+  .progress {
+    height: 2px;
+    background: var(--line);
+    border-radius: 1px;
+    overflow: hidden;
+  }
+  .progress > div {
+    height: 100%;
+    width: 0%;
+    background: var(--warm);
+  }
+
   .warn {
     margin: 0;
     color: var(--warn);
     font-size: 11.5px;
     line-height: 1.4;
+    overflow-wrap: anywhere;
   }
 
   .controls {
@@ -207,7 +221,7 @@
 <section class="hud" id="hud" aria-label="Viewer status and controls">
   <div class="hud-head">
     <span class="brand">Mandel</span>
-    <span class="pill" id="modePill" title="Arithmetic used for the current zoom">FP32</span>
+    <span class="pill" id="modePill" title="How pixels are computed at this zoom">Direct</span>
   </div>
 
   <dl class="stats">
@@ -215,8 +229,10 @@
     <dt>Re</dt><dd id="sRe">−0.750000</dd>
     <dt>Im</dt><dd id="sIm">+0.000000</dd>
     <dt>Iter</dt><dd id="sIter">200</dd>
+    <dt>Ref</dt><dd id="sRef">–</dd>
     <dt>Frame</dt><dd id="sFrame">–</dd>
   </dl>
+  <div class="progress" aria-hidden="true"><div id="progressBar"></div></div>
 
   <p class="warn" id="warn" hidden></p>
 
@@ -226,7 +242,7 @@
       <button type="button" id="btnBanded" aria-pressed="false">Banded</button>
     </div>
     <button type="button" class="palette-btn wide" id="btnPalette" title="Next palette (P)">
-      <span id="paletteName">Palette 1</span><span class="swatch" id="swatch"></span>
+      <span id="paletteName">Ultra</span><span class="swatch" id="swatch"></span>
     </button>
     <div class="stepper">
       <button type="button" id="btnIterDown" aria-label="Fewer iterations">−</button>
@@ -241,8 +257,9 @@
     <select id="places" class="wide" aria-label="Jump to a location">
       <option value="">Jump to…</option>
     </select>
+    <button type="button" id="btnCopy">Copy location</button>
     <button type="button" id="btnReset">Reset</button>
-    <button type="button" id="btnHide">Hide panel</button>
+    <button type="button" id="btnHide" class="wide">Hide panel</button>
   </div>
 
   <p class="help desk-help">
@@ -260,21 +277,25 @@
   "use strict";
 
   // ---------- constants ----------
-  const DF_THRESHOLD = 1e-5;        // units per pixel below which FP32 runs out of precision
-  const DF_MIN_SCALE = 2e-15;       // double-float floor (~10^12 zoom)
-  const FP_MIN_SCALE = 5e-7;        // floor if double-float is unavailable
-  const MAX_SCALE = 0.05;
-  const MAX_ITER_LIMIT = 50000;
+  const DIRECT_LIMIT_LOG2 = Math.log2(1e-5);   // below this pixel size: perturbation
+  const MAX_SCALE_LOG2 = Math.log2(0.05);
+  const MIN_SCALE_LOG2 = -33300;                // ≈ 10^-10000 units per pixel
+  const MAX_ITER_LIMIT = 1000000;
+  const REF_TEX_WIDTH = 4096;
   const PALETTES = ["Ultra", "Ember", "Lagoon", "Lichen"];
 
+  const SPIRAL_X = "-0.743643887037158704752191506114774";
+  const SPIRAL_Y = "0.131825904205311970493132056385139";
   const PLACES = [
-    { name: "Whole set", x: -0.75, y: 0, zoom: 1 },
-    { name: "Seahorse Valley", x: -0.7453, y: 0.1127, zoom: 60 },
-    { name: "Elephant Valley", x: 0.285, y: 0.011, zoom: 60 },
-    { name: "Period-3 mini Mandelbrot", x: -1.7549, y: 0, zoom: 80 },
-    { name: "Spiral, 10⁶ deep", x: -0.743643887037158704752191506114774, y: 0.131825904205311970493132056385139, zoom: 1e6 },
-    { name: "Spiral, 10⁹ deep", x: -0.743643887037158704752191506114774, y: 0.131825904205311970493132056385139, zoom: 1e9 },
-    { name: "Spiral, 10¹¹ deep", x: -0.743643887037158704752191506114774, y: 0.131825904205311970493132056385139, zoom: 1e11 },
+    { name: "Whole set", x: "-0.75", y: "0", zoomLog10: 0 },
+    { name: "Seahorse Valley", x: "-0.7453", y: "0.1127", zoomLog10: Math.log10(60) },
+    { name: "Elephant Valley", x: "0.285", y: "0.011", zoomLog10: Math.log10(60) },
+    { name: "Period-3 mini Mandelbrot", x: "-1.7549", y: "0", zoomLog10: Math.log10(80) },
+    { name: "Spiral, 10⁹ deep", x: SPIRAL_X, y: SPIRAL_Y, zoomLog10: 9 },
+    { name: "Spiral, 10²⁰ deep", x: SPIRAL_X, y: SPIRAL_Y, zoomLog10: 20 },
+    { name: "Branch point c = i, 10³⁰ deep", x: "0", y: "1", zoomLog10: 30 },
+    { name: "Branch point c = i, 10¹⁰⁰ deep", x: "0", y: "1", zoomLog10: 100 },
+    { name: "Branch point c = i, 10³⁰⁰ deep", x: "0", y: "1", zoomLog10: 300 },
   ];
 
   // ---------- DOM ----------
@@ -282,17 +303,150 @@
   const $ = (id) => document.getElementById(id);
   const hud = $("hud"), showHud = $("showHud");
 
+  function fatal(text) {
+    hud.hidden = true;
+    const msg = document.createElement("div");
+    msg.className = "fatal";
+    msg.textContent = text;
+    document.body.appendChild(msg);
+  }
+
   const gl = canvas.getContext("webgl2", {
     alpha: false, antialias: false, depth: false, stencil: false,
     powerPreference: "high-performance", preserveDrawingBuffer: false,
   });
   if (!gl) {
-    hud.hidden = true;
-    const msg = document.createElement("div");
-    msg.className = "fatal";
-    msg.textContent = "This browser has no WebGL2, which the viewer needs. Try a current Safari, Chrome or Firefox.";
-    document.body.appendChild(msg);
+    fatal("This browser has no WebGL2, which the viewer needs. Try a current Safari, Chrome or Firefox.");
     return;
+  }
+
+  // ---------- arbitrary-precision view ----------
+  // Centre: BigInt fixed point with P fractional bits. Pixel size: sm · 2^se, sm in [1, 2).
+  const view = { P: 64, cx: 0n, cy: 0n, sm: 1, se: -8 };
+
+  const pow2 = (e) => {             // 2^e without intermediate under/overflow
+    const h = Math.trunc(e / 2);
+    return 2 ** h * 2 ** (e - h);
+  };
+  function bitLength(b) {
+    if (b < 0n) b = -b;
+    if (b === 0n) return 0;
+    const hex = b.toString(16);
+    return (hex.length - 1) * 4 + Math.floor(Math.log2(parseInt(hex[0], 16))) + 1;
+  }
+  // BigInt fixed point → [m, e] with value ≈ m · 2^e.
+  function bigToFE(b, P) {
+    if (b === 0n) return [0, 0];
+    const sh = Math.max(0, bitLength(b) - 62);
+    return [Number(b >> BigInt(sh)), sh - P];
+  }
+  function bigToNumber(b, P) {
+    const [m, e] = bigToFE(b, P);
+    return m * pow2(e);
+  }
+  // v · 2^exp → BigInt fixed point with P fractional bits.
+  function toFixed(v, exp, P) {
+    if (!v || !isFinite(v)) return 0n;
+    const t = exp + P;
+    if (t <= 60) return BigInt(Math.round(v * pow2(t)));
+    return BigInt(Math.round(v * 2 ** 60)) << BigInt(t - 60);
+  }
+  function decToFixed(str, P) {
+    let s = str.trim(), neg = false;
+    if (s[0] === "-") { neg = true; s = s.slice(1); } else if (s[0] === "+") { s = s.slice(1); }
+    const [ip, fp = ""] = s.split(".");
+    const v = (BigInt((ip || "0") + fp) << BigInt(P)) / 10n ** BigInt(fp.length);
+    return neg ? -v : v;
+  }
+  function fixedToDec(b, P, digits) {
+    const neg = b < 0n;
+    if (neg) b = -b;
+    const ip = b >> BigInt(P);
+    const frac = b - (ip << BigInt(P));
+    const fd = (frac * 10n ** BigInt(digits)) >> BigInt(P);
+    return (neg ? "−" : "+") + ip.toString() + "." + fd.toString().padStart(digits, "0");
+  }
+
+  const scaleLog2Of = (s) => s.se + Math.log2(s.sm);
+  const scaleLog2 = () => scaleLog2Of(view);
+  function setScaleLog2(lg) {
+    lg = Math.min(Math.max(lg, MIN_SCALE_LOG2), MAX_SCALE_LOG2);
+    view.se = Math.floor(lg);
+    view.sm = 2 ** (lg - view.se);
+    ensurePrecision();
+  }
+  function normScale() {
+    const k = Math.floor(Math.log2(view.sm));
+    view.sm /= 2 ** k;
+    view.se += k;
+  }
+  // Keep at least 64 bits below the pixel size; shift the centre when that changes.
+  function ensurePrecision() {
+    let need = Math.max(64, Math.ceil(-scaleLog2()) + 64);
+    need = Math.ceil(need / 32) * 32;
+    if (need > view.P) {
+      const d = BigInt(need - view.P);
+      view.cx <<= d; view.cy <<= d; view.P = need;
+    } else if (need < view.P - 128) {
+      const d = BigInt(view.P - need);
+      view.cx >>= d; view.cy >>= d; view.P = need;
+    }
+  }
+
+  const snapshot = () => ({ P: view.P, cx: view.cx, cy: view.cy, sm: view.sm, se: view.se });
+  // (a.centre − b.centre) / unit.pixelSize, in pixels.
+  function offsetPixels(a, b, unit) {
+    const P = Math.max(a.P, b.P);
+    const ax = a.cx << BigInt(P - a.P), ay = a.cy << BigInt(P - a.P);
+    const bx = b.cx << BigInt(P - b.P), by = b.cy << BigInt(P - b.P);
+    const [mx, ex] = bigToFE(ax - bx, P);
+    const [my, ey] = bigToFE(ay - by, P);
+    return [(mx / unit.sm) * pow2(ex - unit.se), (my / unit.sm) * pow2(ey - unit.se)];
+  }
+
+  const settings = { colorMode: 0, palette: 0, density: 0.02, iterFactor: 1, invert: false };
+  let W = 0, H = 0, fitted = false;
+
+  const minDim = () => Math.max(1, Math.min(W, H));
+  const zoomLog10 = () => Math.log10(3 / minDim()) - scaleLog2() * Math.LOG10E * Math.LN2;
+  const usesPerturbation = (s) => scaleLog2Of(s) < DIRECT_LIMIT_LOG2;
+  const maxIterations = () => {
+    const auto = 200 + 250 * Math.max(zoomLog10(), 0);
+    return Math.round(Math.min(Math.max(auto * settings.iterFactor, 32), MAX_ITER_LIMIT));
+  };
+
+  function fit() {
+    view.P = 64;
+    view.cx = toFixed(-0.75, 0, 64);
+    view.cy = 0n;
+    setScaleLog2(Math.log2(Math.max(3.5 / W, 3.0 / H)));
+  }
+
+  // `px`, `py`: drawable pixels from the view centre, y up.
+  function zoomAt(factor, px, py) {
+    if (!isFinite(factor) || factor <= 0) return;
+    const cur = scaleLog2();
+    const target = Math.min(Math.max(cur + Math.log2(factor), MIN_SCALE_LOG2), MAX_SCALE_LOG2);
+    factor = 2 ** (target - cur);
+    const oldSm = view.sm, oldSe = view.se, k = 1 - factor;
+    view.sm *= factor;
+    normScale();
+    ensurePrecision();
+    view.cx += toFixed(px * oldSm * k, oldSe, view.P);
+    view.cy += toFixed(py * oldSm * k, oldSe, view.P);
+    bump();
+  }
+  function panPixels(dx, dy) {
+    view.cx -= toFixed(dx * view.sm, view.se, view.P);
+    view.cy -= toFixed(dy * view.sm, view.se, view.P);
+    bump();
+  }
+  function jumpTo(place) {
+    if (place.zoomLog10 <= 0) { fit(); bump(); return; }
+    setScaleLog2(Math.log2(3 / minDim()) - place.zoomLog10 / Math.log10(2));
+    view.cx = decToFixed(place.x, view.P);
+    view.cy = decToFixed(place.y, view.P);
+    bump();
   }
 
   // ---------- shaders ----------
@@ -302,130 +456,14 @@
     gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
   }`;
 
-  // Double-float arithmetic. GLSL has no "precise" and no fma, so every rounded
-  // intermediate is multiplied by u_one (= 1.0 at runtime). The compiler cannot
-  // know it is 1, so it cannot simplify (a + b) - a into b and erase the error term;
-  // multiplying by exactly 1 also stays exact if it gets fused into an fma.
-  const DF_LIB = `
-  uniform float u_one;
-  vec2 quick_two_sum(float a, float b) {
-    float s = (a + b) * u_one;
-    float e = b - (s - a);
-    return vec2(s, e);
-  }
-  vec2 two_sum(float a, float b) {
-    float s = (a + b) * u_one;
-    float bb = (s - a) * u_one;
-    float e = (a - (s - bb)) + (b - bb);
-    return vec2(s, e);
-  }
-  vec2 split(float a) {
-    float t = (a * 4097.0) * u_one;
-    float hi = (t - (t - a)) * u_one;
-    return vec2(hi, a - hi);
-  }
-  vec2 two_prod(float a, float b) {
-    float p = (a * b) * u_one;
-    vec2 A = split(a);
-    vec2 B = split(b);
-    float err = ((A.x * B.x - p) + A.x * B.y + A.y * B.x) + A.y * B.y;
-    return vec2(p, err);
-  }
-  vec2 df_add(vec2 a, vec2 b) {
-    vec2 s = two_sum(a.x, b.x);
-    vec2 t = two_sum(a.y, b.y);
-    s.y += t.x;
-    s = quick_two_sum(s.x, s.y);
-    s.y += t.y;
-    return quick_two_sum(s.x, s.y);
-  }
-  vec2 df_mul(vec2 a, vec2 b) {
-    vec2 p = two_prod(a.x, b.x);
-    p.y += a.x * b.y + a.y * b.x;
-    return quick_two_sum(p.x, p.y);
-  }
-  vec2 df_mul_f(vec2 a, float b) {
-    vec2 p = two_prod(a.x, b);
-    p.y += a.y * b;
-    return quick_two_sum(p.x, p.y);
-  }
-  vec2 df_sqr(vec2 a) {
-    vec2 p = two_prod(a.x, a.x);
-    p.y += 2.0 * a.x * a.y;
-    return quick_two_sum(p.x, p.y);
-  }`;
-
-  const ITER_DF = `
-  bool iterate(float px, float py, out float n, out float r2) {
-    n = 0.0; r2 = 0.0;
-    vec2 cx = df_add(u_cx, df_mul_f(u_scale, px));
-    vec2 cy = df_add(u_cy, df_mul_f(u_scale, py));
-    if (inMainBulbs(cx.x, cy.x)) return true;
-    vec2 x = vec2(0.0), y = vec2(0.0), x2 = vec2(0.0), y2 = vec2(0.0);
-    vec2 sx = vec2(0.0), sy = vec2(0.0);
-    int lap = 0, lapLength = 8;
-    for (int i = 0; i < u_maxIter; i++) {
-      vec2 xy = df_mul(x, y);
-      y = df_add(xy * 2.0, cy);
-      x = df_add(df_add(x2, -y2), cx);
-      x2 = df_sqr(x);
-      y2 = df_sqr(y);
-      float m = x2.x + y2.x;
-      if (m > ESCAPE2) { n = float(i + 1); r2 = m; return false; }
-      if (x == sx && y == sy) return true;   // exact repeat: periodic, never escapes
-      if (++lap == lapLength) { lap = 0; lapLength *= 2; sx = x; sy = y; }
-    }
-    return true;
-  }`;
-
-  const ITER_FP = `
-  bool iterate(float px, float py, out float n, out float r2) {
-    n = 0.0; r2 = 0.0;
-    float cx = u_cx.x + px * u_scale.x;
-    float cy = u_cy.x + py * u_scale.x;
-    if (inMainBulbs(cx, cy)) return true;
-    float x = 0.0, y = 0.0, x2 = 0.0, y2 = 0.0, sx = 0.0, sy = 0.0;
-    int lap = 0, lapLength = 8;
-    for (int i = 0; i < u_maxIter; i++) {
-      y = 2.0 * x * y + cy;
-      x = x2 - y2 + cx;
-      x2 = x * x;
-      y2 = y * y;
-      float m = x2 + y2;
-      if (m > ESCAPE2) { n = float(i + 1); r2 = m; return false; }
-      if (x == sx && y == sy) return true;
-      if (++lap == lapLength) { lap = 0; lapLength *= 2; sx = x; sy = y; }
-    }
-    return true;
-  }`;
-
-  const fragSource = (df) => `#version 300 es
-  precision highp float;
-  precision highp int;
-  uniform vec2 u_cx;
-  uniform vec2 u_cy;
-  uniform vec2 u_scale;
+  const COMMON = `
   uniform vec2 u_res;
   uniform int u_maxIter;
   uniform int u_colorMode;
   uniform int u_palette;
   uniform float u_density;
   out vec4 outColor;
-
   const float ESCAPE2 = 65536.0;
-
-  // Main cardioid and period-2 bulb, with a margin so float rounding never
-  // blackens escaping points next to the boundary at deep zoom.
-  bool inMainBulbs(float x, float y) {
-    float y2 = y * y;
-    float xq = x - 0.25;
-    float q = xq * xq + y2;
-    if (q * (q + xq) < 0.25 * y2 - 1e-5) return true;
-    float xb = x + 1.0;
-    return xb * xb + y2 < 0.0625 - 1e-5;
-  }
-
-  ${df ? DF_LIB + ITER_DF : ITER_FP}
 
   vec3 gradientPalette(float t) {
     vec3 c0 = vec3(0.0, 7.0, 100.0) / 255.0;
@@ -449,38 +487,133 @@
     if (u_palette == 3) return cosinePalette(t, vec3(1.0, 1.0, 0.5), vec3(0.80, 0.90, 0.30));
     return gradientPalette(t);
   }
-
-  void main() {
-    float px = gl_FragCoord.x - 0.5 * u_res.x;
-    float py = gl_FragCoord.y - 0.5 * u_res.y;
-    float n, r2;
-    if (iterate(px, py, n, r2)) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
-    vec3 col;
+  vec4 colorFor(bool inside, float n, float r2) {
+    if (inside) return vec4(0.0, 0.0, 0.0, 1.0);
     if (u_colorMode == 0) {
       float mu = n + 1.0 - log2(0.5 * log2(r2));
-      col = paletteColor(mu * u_density);
-    } else {
-      float darken = (int(n) & 1) == 1 ? 0.82 : 1.0;
-      col = paletteColor(n * u_density) * darken;
+      return vec4(paletteColor(mu * u_density), 1.0);
     }
-    outColor = vec4(col, 1.0);
+    float darken = (int(n) & 1) == 1 ? 0.82 : 1.0;
+    return vec4(paletteColor(n * u_density) * darken, 1.0);
   }`;
 
-  // Checks on this GPU that double-float error terms survive compilation.
-  const TEST_FRAG = `#version 300 es
+  // Shallow zoom: plain float iteration, with the interior shortcuts.
+  const DIRECT_FRAG = `#version 300 es
   precision highp float;
-  uniform float u_a;
-  uniform float u_b;
-  uniform float u_m;
-  uniform float u_expect;
-  out vec4 outColor;
-  ${DF_LIB}
+  precision highp int;
+  uniform vec2 u_center;
+  uniform float u_scale;
+  ${COMMON}
+
+  // Main cardioid and period-2 bulb, with a margin so float rounding never
+  // blackens escaping points next to the boundary.
+  bool inMainBulbs(float x, float y) {
+    float y2 = y * y;
+    float xq = x - 0.25;
+    float q = xq * xq + y2;
+    if (q * (q + xq) < 0.25 * y2 - 1e-5) return true;
+    float xb = x + 1.0;
+    return xb * xb + y2 < 0.0625 - 1e-5;
+  }
+
   void main() {
-    vec2 s = two_sum(u_a, u_b);
-    vec2 p = two_prod(u_m, u_m);
-    bool sumOk = s.x == u_a && s.y == u_b;
-    bool prodOk = p.y == u_expect;
-    outColor = vec4(sumOk ? 1.0 : 0.0, prodOk ? 1.0 : 0.0, 0.0, 1.0);
+    float cx = u_center.x + (gl_FragCoord.x - 0.5 * u_res.x) * u_scale;
+    float cy = u_center.y + (gl_FragCoord.y - 0.5 * u_res.y) * u_scale;
+    if (inMainBulbs(cx, cy)) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+    float x = 0.0, y = 0.0, x2 = 0.0, y2 = 0.0, sx = 0.0, sy = 0.0;
+    int lap = 0, lapLength = 8;
+    for (int i = 0; i < u_maxIter; i++) {
+      y = 2.0 * x * y + cy;
+      x = x2 - y2 + cx;
+      x2 = x * x;
+      y2 = y * y;
+      float m = x2 + y2;
+      if (m > ESCAPE2) { outColor = colorFor(false, float(i + 1), m); return; }
+      if (x == sx && y == sy) break;   // exact repeat: periodic, never escapes
+      if (++lap == lapLength) { lap = 0; lapLength *= 2; sx = x; sy = y; }
+    }
+    outColor = vec4(0.0, 0.0, 0.0, 1.0);
+  }`;
+
+  // Deep zoom: perturbation against one high-precision reference orbit Z.
+  // Each pixel tracks dz = z - Z. While dz is far below float range it is kept
+  // as w · 2^e (mantissa vector + integer exponent), so depth is unlimited.
+  // Rebasing (dz := z, restart the reference at 0) whenever |z| < |dz| or the
+  // reference runs out keeps one reference valid for the whole image.
+  const PERTURB_FRAG = `#version 300 es
+  precision highp float;
+  precision highp int;
+  precision highp sampler2D;
+  uniform sampler2D u_ref;
+  uniform int u_refLen;
+  uniform vec2 u_off;     // view centre minus reference point, in pixels
+  uniform float u_sm;     // pixel size = u_sm · 2^u_se
+  uniform int u_se;
+  ${COMMON}
+
+  vec2 refZ(int n) { return texelFetch(u_ref, ivec2(n & ${REF_TEX_WIDTH - 1}, n >> 12), 0).xy; }
+  vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+  float pow2i(int e) { return exp2(float(clamp(e, -200, 120))); }
+
+  void main() {
+    vec2 dcw = (gl_FragCoord.xy - 0.5 * u_res + u_off) * u_sm;   // dc = dcw · 2^se
+    vec2 dcf = dcw * pow2i(u_se);                                  // dc as plain float (0 when tiny)
+    vec2 w = dcw;               // dz_1 = dc
+    int e = u_se;
+    bool scaled = e < -80;
+    vec2 dz = scaled ? vec2(0.0) : w * pow2i(e);
+    int m = 1;
+    for (int i = 1; i < u_maxIter; i++) {
+      vec2 Z = refZ(m);
+      vec2 z = scaled ? Z + w * pow2i(e) : Z + dz;
+      float zr2 = dot(z, z);
+      if (zr2 > ESCAPE2) { outColor = colorFor(false, float(i), zr2); return; }
+      if (scaled) {
+        if (m >= u_refLen - 1) { scaled = false; dz = z; m = 0; Z = vec2(0.0); }
+      } else if (zr2 < dot(dz, dz) || m >= u_refLen - 1) {
+        dz = z; m = 0; Z = vec2(0.0);
+      }
+      if (scaled) {
+        w = 2.0 * cmul(Z, w) + pow2i(e) * cmul(w, w) + dcw * pow2i(u_se - e);
+        float mag = max(abs(w.x), abs(w.y));
+        if (mag > 1048576.0) { w *= 1.0 / 1048576.0; e += 20; }
+        else if (mag < 1.0 / 1048576.0 && mag > 0.0) { w *= 1048576.0; e -= 20; }
+        if (e > -80) { scaled = false; dz = w * pow2i(e); }
+      } else {
+        dz = 2.0 * cmul(Z, dz) + cmul(dz, dz) + dcf;
+      }
+      m++;
+    }
+    outColor = vec4(0.0, 0.0, 0.0, 1.0);
+  }`;
+
+  // Shows the last finished image and the strips of the image in progress,
+  // each mapped to the current view, so zooming stays fluid while deep frames render.
+  const COMPOSITE_FRAG = `#version 300 es
+  precision highp float;
+  uniform sampler2D u_front;
+  uniform sampler2D u_back;
+  uniform vec2 u_res;
+  uniform int u_hasFront;
+  uniform vec2 u_frontOff;
+  uniform float u_frontRatio;
+  uniform int u_hasBack;
+  uniform vec2 u_backOff;
+  uniform float u_backRatio;
+  uniform float u_backRows;
+  out vec4 outColor;
+  void main() {
+    vec2 p = gl_FragCoord.xy - 0.5 * u_res;
+    vec3 col = vec3(0.016, 0.02, 0.043);
+    if (u_hasFront == 1) {
+      vec2 t = p * u_frontRatio + u_frontOff + 0.5 * u_res;
+      if (t.x >= 0.0 && t.y >= 0.0 && t.x < u_res.x && t.y < u_res.y) col = texture(u_front, t / u_res).rgb;
+    }
+    if (u_hasBack == 1) {
+      vec2 t = p * u_backRatio + u_backOff + 0.5 * u_res;
+      if (t.x >= 0.0 && t.y >= 0.0 && t.x < u_res.x && t.y < u_backRows) col = texture(u_back, t / u_res).rgb;
+    }
+    outColor = vec4(col, 1.0);
   }`;
 
   function compile(type, src) {
@@ -492,9 +625,9 @@
     }
     return sh;
   }
-  function link(vsSrc, fsSrc, uniforms) {
+  function link(fsSrc, uniforms) {
     const prog = gl.createProgram();
-    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
     gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
@@ -505,127 +638,301 @@
     return { prog, loc };
   }
 
-  const MAIN_UNIFORMS = ["u_cx", "u_cy", "u_scale", "u_res", "u_maxIter", "u_colorMode", "u_palette", "u_density", "u_one"];
-  let progFP, progDF, vao;
-  let dfAvailable = true;
+  const COMMON_UNIFORMS = ["u_res", "u_maxIter", "u_colorMode", "u_palette", "u_density"];
+  let progDirect, progPerturb, progComposite, vao;
+  let surfaces = [];
 
   function initGL() {
-    progFP = link(VERT, fragSource(false), MAIN_UNIFORMS);
-    progDF = link(VERT, fragSource(true), MAIN_UNIFORMS);
+    progDirect = link(DIRECT_FRAG, [...COMMON_UNIFORMS, "u_center", "u_scale"]);
+    progPerturb = link(PERTURB_FRAG, [...COMMON_UNIFORMS, "u_ref", "u_refLen", "u_off", "u_sm", "u_se"]);
+    progComposite = link(COMPOSITE_FRAG, ["u_front", "u_back", "u_res", "u_hasFront", "u_frontOff", "u_frontRatio",
+      "u_hasBack", "u_backOff", "u_backRatio", "u_backRows"]);
     vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
-    dfAvailable = runSelfTest();
+    surfaces = [];
+    if (ref) ref.tex = uploadRef(ref.orbit, ref.len);
   }
 
-  function runSelfTest() {
-    try {
-      const t = link(VERT, TEST_FRAG, ["u_a", "u_b", "u_m", "u_expect", "u_one"]);
-      gl.useProgram(t.prog);
-      gl.uniform1f(t.loc.u_a, 1.0);
-      gl.uniform1f(t.loc.u_b, 1e-9);
-      gl.uniform1f(t.loc.u_m, 1 + Math.pow(2, -12));
-      gl.uniform1f(t.loc.u_expect, Math.pow(2, -24));
-      gl.uniform1f(t.loc.u_one, 1.0);
-      gl.viewport(0, 0, 1, 1);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-      const px = new Uint8Array(4);
-      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
-      gl.deleteProgram(t.prog);
-      return px[0] > 127 && px[1] > 127;
-    } catch (err) {
-      console.warn("Double-float self-test failed to run:", err);
-      return false;
+  function makeSurface(w, h) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.clearColor(0.016, 0.02, 0.043, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { tex, fb };
+  }
+  function resizeSurfaces() {
+    for (const s of surfaces) { gl.deleteTexture(s.tex); gl.deleteFramebuffer(s.fb); }
+    surfaces = [makeSurface(W, H), makeSurface(W, H)];
+    front = null;
+    back = null;
+    if (chunk) { gl.deleteSync(chunk.sync); chunk = null; }
+  }
+
+  // ---------- reference orbit (BigInt, in a worker) ----------
+  const WORKER_SRC = `
+  self.onmessage = (ev) => {
+    const { id, cx, cy, P, maxIter } = ev.data;
+    const X = BigInt(cx), Y = BigInt(cy), p = BigInt(P), p1 = p - 1n, sh = p - 64n;
+    const esc = 65536n << p;
+    const k = 2 ** -64;
+    const out = new Float32Array(2 * (maxIter + 1));
+    let x = 0n, y = 0n, x2 = 0n, y2 = 0n, len = maxIter + 1, escaped = false;
+    for (let n = 1; n <= maxIter; n++) {
+      const xy2 = (x * y) >> p1;
+      x = x2 - y2 + X;
+      y = xy2 + Y;
+      out[2 * n] = Number(x >> sh) * k;
+      out[2 * n + 1] = Number(y >> sh) * k;
+      x2 = (x * x) >> p;
+      y2 = (y * y) >> p;
+      if (x2 + y2 > esc) { len = n + 1; escaped = true; break; }
+      if ((n & 4095) === 0) self.postMessage({ id, progress: n / maxIter });
     }
+    self.postMessage({ id, done: true, orbit: out, len, escaped }, [out.buffer]);
+  };`;
+  const workerURL = URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" }));
+
+  let ref = null;      // { snap, P, len, escaped, orbit, tex }
+  let refJob = null;   // { id, worker, snap, P, maxIter, progress, start }
+  let refJobId = 0;
+  let lastRefMs = null;
+
+  function uploadRef(orbit, len) {
+    const rows = Math.ceil(len / REF_TEX_WIDTH);
+    const data = new Float32Array(rows * REF_TEX_WIDTH * 2);
+    data.set(orbit.subarray(0, 2 * len));
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, REF_TEX_WIDTH, rows, 0, gl.RG, gl.FLOAT, data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    return tex;
   }
 
-  // ---------- view state (Double on the CPU) ----------
-  const view = { x: -0.75, y: 0, scale: 0.004 };
-  const settings = { colorMode: 0, palette: 0, density: 0.02, iterFactor: 1, invert: false };
-  let fitted = false;
-
-  const minScale = () => (dfAvailable ? DF_MIN_SCALE : FP_MIN_SCALE);
-  const minDim = () => Math.max(1, Math.min(canvas.width, canvas.height));
-  const zoomLevel = () => 3 / (view.scale * minDim());
-  const usesDF = () => dfAvailable && view.scale < DF_THRESHOLD;
-  const maxIterations = () => {
-    const auto = 200 + 250 * Math.log10(Math.max(zoomLevel(), 1));
-    return Math.round(Math.min(Math.max(auto * settings.iterFactor, 32), MAX_ITER_LIMIT));
-  };
-
-  function fit() {
-    view.x = -0.75;
-    view.y = 0;
-    view.scale = Math.max(3.5 / canvas.width, 3.0 / canvas.height);
+  // Can a reference computed at `r` (with r.P bits, up to r.maxIter / r.len) serve view `s`?
+  function refFits(r, s, maxIter) {
+    if (r.P < Math.ceil(-scaleLog2Of(s)) + 40) return false;
+    if (!r.escaped && r.iterLimit < maxIter) return false;
+    const [ox, oy] = offsetPixels(s, r.snap, s);
+    const lim = 2 * Math.max(W, H);
+    return Math.abs(ox) < lim && Math.abs(oy) < lim;
   }
 
-  // `px`, `py`: drawable pixels from the view centre, y up.
-  function zoomAt(factor, px, py) {
-    if (!isFinite(factor) || factor <= 0) return;
-    const next = Math.min(Math.max(view.scale * factor, minScale()), MAX_SCALE);
-    view.x += px * (view.scale - next);
-    view.y += py * (view.scale - next);
-    view.scale = next;
-    markDirty();
-  }
-  function panPixels(dx, dy) {
-    view.x -= dx * view.scale;
-    view.y -= dy * view.scale;
-    markDirty();
-  }
-  function jumpTo(place) {
-    if (place.zoom <= 1) { fit(); } else {
-      view.x = place.x;
-      view.y = place.y;
-      view.scale = Math.max(3 / (place.zoom * minDim()), minScale());
-    }
-    markDirty();
+  function ensureRefJob(s, maxIter) {
+    if (refJob && refFits({ ...refJob, escaped: false, iterLimit: refJob.maxIter }, s, maxIter)) return;
+    if (refJob) refJob.worker.terminate();
+    const id = ++refJobId;
+    const iterLimit = Math.min(MAX_ITER_LIMIT, Math.ceil(maxIter * 1.5));
+    const worker = new Worker(workerURL);
+    refJob = { id, worker, snap: s, P: s.P, maxIter: iterLimit, progress: 0, start: performance.now() };
+    worker.onmessage = (ev) => {
+      const d = ev.data;
+      if (!refJob || d.id !== refJob.id) return;
+      if (!d.done) { refJob.progress = d.progress; updateHud(); return; }
+      const job = refJob;
+      refJob = null;
+      worker.terminate();
+      if (gl.isContextLost()) return;
+      if (back && back.perturb) back = null;   // it was using the old reference
+      if (ref && ref.tex) gl.deleteTexture(ref.tex);
+      ref = { snap: job.snap, P: job.P, len: d.len, escaped: d.escaped, iterLimit: job.maxIter,
+              orbit: d.orbit, tex: uploadRef(d.orbit, d.len) };
+      lastRefMs = performance.now() - job.start;
+      needComposite = true;
+      request();
+      updateHud();
+    };
+    worker.onerror = (err) => {
+      console.error("Reference orbit worker failed:", err);
+      refJob = null;
+      showWarn("The reference orbit calculation failed. Zoom out a little and try again.");
+    };
+    worker.postMessage({ id, cx: s.cx.toString(), cy: s.cy.toString(), P: s.P, maxIter: iterLimit });
+    updateHud();
   }
 
-  // ---------- rendering: on demand, one frame in flight ----------
-  let dirty = true, inFlight = null, rafId = 0, frameMs = null;
+  // ---------- rendering ----------
+  // `back` renders in horizontal strips sized to ~30 ms of GPU time; when it is
+  // complete it becomes `front`. Both are shown through the composite pass.
+  let front = null;    // { surf, snap, version }
+  let back = null;     // { surf, snap, version, rows, start, perturb, maxIter, colors, ref }
+  let chunk = null;    // { sync, y0, y1, t0 }
+  let stripRows = 0;
+  let viewVersion = 1;
+  let needComposite = true;
+  let frameMs = null;
+  let rafId = 0;
 
   function request() { if (!rafId) rafId = requestAnimationFrame(tick); }
-  function markDirty() { dirty = true; request(); updateHud(); }
+  function bump() { viewVersion++; needComposite = true; request(); updateHud(); }
 
   function tick() {
     rafId = 0;
-    if (gl.isContextLost()) return;
-    if (inFlight) {
-      if (gl.getSyncParameter(inFlight.sync, gl.SYNC_STATUS) !== gl.SIGNALED) { request(); return; }
-      gl.deleteSync(inFlight.sync);
-      frameMs = performance.now() - inFlight.t0;
-      inFlight = null;
+    if (gl.isContextLost() || W === 0 || surfaces.length === 0) return;
+    const now = performance.now();
+
+    if (chunk) {
+      if (gl.getSyncParameter(chunk.sync, gl.SYNC_STATUS) === gl.SIGNALED) {
+        gl.deleteSync(chunk.sync);
+        if (back) {
+          back.rows = chunk.y1;
+          adaptStrip(back, now - chunk.t0, chunk.y1 - chunk.y0);
+        }
+        chunk = null;
+        needComposite = true;
+      }
+    }
+
+    if (back && !chunk && back.rows >= H) {
+      front = { surf: back.surf, snap: back.snap, version: back.version };
+      frameMs = now - back.start;
+      back = null;
+      needComposite = true;
       updateHud();
     }
-    if (dirty && canvas.width > 0 && canvas.height > 0) {
-      dirty = false;
-      const t0 = performance.now();
-      draw();
-      inFlight = { sync: gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0), t0 };
-      gl.flush();
-      request();
+
+    // A stale frame in progress is dropped once it has had 300 ms; quicker frames finish.
+    if (back && !chunk && back.version !== viewVersion && (back.rows === 0 || now - back.start > 300)) {
+      back = null;
+      needComposite = true;
     }
+
+    if (!back && !chunk && (!front || front.version !== viewVersion)) startBack(now);
+    if (back && !chunk) issueChunk(now);
+
+    if (needComposite) { composite(); needComposite = false; }
+    if (chunk || back || (front && front.version !== viewVersion) || !front) request();
+    updateProgress();
   }
 
-  function setSplit(loc, v) {
-    const hi = Math.fround(v);
-    gl.uniform2f(loc, hi, Math.fround(v - hi));
+  // Learned GPU throughput in pixel-iterations per ms, per mode. Strips are sized
+  // from it so no single draw runs long enough to trip the GPU watchdog.
+  const throughput = { direct: 1e6, perturb: 2e5 };
+  const STRIP_TARGET_MS = 30;
+
+  function rowsFor(b) {
+    const t = throughput[b.perturb ? "perturb" : "direct"];
+    return Math.min(H, Math.max(1, Math.floor((STRIP_TARGET_MS * t) / (W * b.maxIter))));
+  }
+  function adaptStrip(b, ms, rows) {
+    const key = b.perturb ? "perturb" : "direct";
+    // Below ~20 ms the fence is only seen at the next display frame, so the
+    // measurement is a floor: grow instead of trusting it.
+    if (ms < 20) throughput[key] *= 2;
+    else throughput[key] = (rows * W * b.maxIter) / ms;
+    stripRows = rowsFor(b);
   }
 
-  function draw() {
-    const p = usesDF() ? progDF : progFP;
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.useProgram(p.prog);
-    setSplit(p.loc.u_cx, view.x);
-    setSplit(p.loc.u_cy, view.y);
-    setSplit(p.loc.u_scale, view.scale);
-    gl.uniform2f(p.loc.u_res, canvas.width, canvas.height);
-    gl.uniform1i(p.loc.u_maxIter, maxIterations());
-    gl.uniform1i(p.loc.u_colorMode, settings.colorMode);
-    gl.uniform1i(p.loc.u_palette, settings.palette);
-    gl.uniform1f(p.loc.u_density, settings.density);
-    gl.uniform1f(p.loc.u_one, 1.0);
+  function startBack(now) {
+    const s = snapshot();
+    const perturb = usesPerturbation(s);
+    const maxIter = maxIterations();
+    if (perturb && !(ref && refFits(ref, s, maxIter))) {
+      ensureRefJob(s, maxIter);
+      return;
+    }
+    const surf = front && front.surf === surfaces[0] ? surfaces[1] : surfaces[0];
+    back = {
+      surf, snap: s, version: viewVersion, rows: 0, start: now, perturb, maxIter,
+      colors: { mode: settings.colorMode, palette: settings.palette, density: settings.density },
+      ref: perturb ? ref : null,
+    };
+    stripRows = rowsFor(back);
+    updateHud();
+  }
+
+  function issueChunk(now) {
+    const y0 = back.rows, y1 = Math.min(H, y0 + stripRows);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, back.surf.fb);
+    gl.viewport(0, 0, W, H);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, y0, W, y1 - y0);
+    drawFractal(back);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    chunk = { sync: gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0), y0, y1, t0: now };
+    gl.flush();
+  }
+
+  function setCommon(p, b) {
+    gl.uniform2f(p.loc.u_res, W, H);
+    gl.uniform1i(p.loc.u_maxIter, b.maxIter);
+    gl.uniform1i(p.loc.u_colorMode, b.colors.mode);
+    gl.uniform1i(p.loc.u_palette, b.colors.palette);
+    gl.uniform1f(p.loc.u_density, b.colors.density);
+  }
+
+  function drawFractal(b) {
     gl.bindVertexArray(vao);
+    if (!b.perturb) {
+      const p = progDirect;
+      gl.useProgram(p.prog);
+      setCommon(p, b);
+      gl.uniform2f(p.loc.u_center, bigToNumber(b.snap.cx, b.snap.P), bigToNumber(b.snap.cy, b.snap.P));
+      gl.uniform1f(p.loc.u_scale, b.snap.sm * pow2(b.snap.se));
+    } else {
+      const p = progPerturb;
+      gl.useProgram(p.prog);
+      setCommon(p, b);
+      const [ox, oy] = offsetPixels(b.snap, b.ref.snap, b.snap);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, b.ref.tex);
+      gl.uniform1i(p.loc.u_ref, 2);
+      gl.uniform1i(p.loc.u_refLen, b.ref.len);
+      gl.uniform2f(p.loc.u_off, ox, oy);
+      gl.uniform1f(p.loc.u_sm, b.snap.sm);
+      gl.uniform1i(p.loc.u_se, b.snap.se);
+    }
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  // Maps current-view pixels into an image rendered for snapshot `s`.
+  function mapping(cur, s) {
+    const ratio = (cur.sm / s.sm) * pow2(cur.se - s.se);
+    const [ox, oy] = offsetPixels(cur, s, s);
+    return [ratio, ox, oy];
+  }
+
+  function composite() {
+    const cur = snapshot();
+    const p = progComposite;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(p.prog);
+    gl.bindVertexArray(vao);
+    gl.uniform2f(p.loc.u_res, W, H);
+    gl.uniform1i(p.loc.u_front, 0);
+    gl.uniform1i(p.loc.u_back, 1);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, front ? front.surf.tex : surfaces[0].tex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, back ? back.surf.tex : surfaces[1].tex);
+    if (front) {
+      const [r, ox, oy] = mapping(cur, front.snap);
+      gl.uniform1i(p.loc.u_hasFront, 1);
+      gl.uniform1f(p.loc.u_frontRatio, r);
+      gl.uniform2f(p.loc.u_frontOff, ox, oy);
+    } else {
+      gl.uniform1i(p.loc.u_hasFront, 0);
+    }
+    if (back && back.rows > 0) {
+      const [r, ox, oy] = mapping(cur, back.snap);
+      gl.uniform1i(p.loc.u_hasBack, 1);
+      gl.uniform1f(p.loc.u_backRatio, r);
+      gl.uniform2f(p.loc.u_backOff, ox, oy);
+      gl.uniform1f(p.loc.u_backRows, back.rows);
+    } else {
+      gl.uniform1i(p.loc.u_hasBack, 0);
+    }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
@@ -640,25 +947,23 @@
       w = Math.round(e.contentRect.width * devicePixelRatio);
       h = Math.round(e.contentRect.height * devicePixelRatio);
     }
-    if (w === canvas.width && h === canvas.height) return;
-    canvas.width = w;
-    canvas.height = h;
+    if (w === W && h === H) return;
+    W = canvas.width = w;
+    H = canvas.height = h;
+    if (gl.isContextLost()) return;
+    resizeSurfaces();
+    stripRows = H;
     if (!fitted) { fit(); fitted = true; }
-    markDirty();
+    bump();
   });
-  try { resizeObserver.observe(canvas, { box: "device-pixel-content-box" }); }
-  catch { resizeObserver.observe(canvas); }
 
   // ---------- input ----------
   function pixelFromClient(clientX, clientY) {
     const r = canvas.getBoundingClientRect();
-    const ratio = canvas.width / Math.max(r.width, 1);
-    return [
-      (clientX - r.left) * ratio - canvas.width / 2,
-      (r.bottom - clientY) * ratio - canvas.height / 2,
-    ];
+    const ratio = W / Math.max(r.width, 1);
+    return [(clientX - r.left) * ratio - W / 2, (r.bottom - clientY) * ratio - H / 2];
   }
-  const cssToPixels = () => canvas.width / Math.max(canvas.getBoundingClientRect().width, 1);
+  const cssToPixels = () => W / Math.max(canvas.getBoundingClientRect().width, 1);
 
   let gestureActive = false, lastGestureScale = 1;
   const pointers = new Map();
@@ -731,15 +1036,15 @@
     zoomAt(e.shiftKey ? 2 : 0.5, px, py);
   });
 
-  const changeIter = (f) => { settings.iterFactor = Math.min(Math.max(settings.iterFactor * f, 1 / 16), 64); markDirty(); };
-  const changeDensity = (f) => { settings.density = Math.min(Math.max(settings.density * f, 0.001), 2); markDirty(); };
-  const setColorMode = (m) => { settings.colorMode = m; markDirty(); };
-  const nextPalette = () => { settings.palette = (settings.palette + 1) % PALETTES.length; markDirty(); };
-  const reset = () => { settings.iterFactor = 1; fit(); markDirty(); };
+  const changeIter = (f) => { settings.iterFactor = Math.min(Math.max(settings.iterFactor * f, 1 / 16), 64); bump(); };
+  const changeDensity = (f) => { settings.density = Math.min(Math.max(settings.density * f, 0.001), 2); bump(); };
+  const setColorMode = (m) => { settings.colorMode = m; bump(); };
+  const nextPalette = () => { settings.palette = (settings.palette + 1) % PALETTES.length; bump(); };
+  const reset = () => { settings.iterFactor = 1; fit(); bump(); };
   const setHudHidden = (hidden) => { hud.hidden = hidden; showHud.hidden = !hidden; if (!hidden) updateHud(); };
 
   window.addEventListener("keydown", (e) => {
-    if (e.metaKey || e.ctrlKey || e.altKey && !["[", "]"].includes(e.key)) return;
+    if (e.metaKey || e.ctrlKey) return;
     if (e.target instanceof HTMLSelectElement) return;
     switch (e.key) {
       case "ArrowUp": case "]": changeIter(1.5); break;
@@ -780,7 +1085,23 @@
     const p = PLACES[Number(placesSelect.value)];
     if (p) jumpTo(p);
     placesSelect.value = "";
-    canvas.focus?.();
+  });
+
+  const locationDigits = () => Math.min(12000, Math.max(6, Math.ceil(zoomLog10()) + 6));
+  function locationText() {
+    const d = locationDigits();
+    return `Re ${fixedToDec(view.cx, view.P, d).replace("−", "-")}\n` +
+           `Im ${fixedToDec(view.cy, view.P, d).replace("−", "-")}\n` +
+           `Zoom ${formatZoom()}`;
+  }
+  $("btnCopy").addEventListener("click", () => {
+    const text = locationText();
+    const done = () => { $("btnCopy").textContent = "Copied"; setTimeout(() => { $("btnCopy").textContent = "Copy location"; }, 1200); };
+    try {
+      navigator.clipboard.writeText(text).then(done, () => showWarn(text));
+    } catch {
+      showWarn(text);
+    }
   });
 
   // ---------- HUD ----------
@@ -814,43 +1135,66 @@
     $("paletteName").textContent = PALETTES[settings.palette];
   }
 
-  const fmtSigned = (v, digits) => (v < 0 ? "−" : "+") + Math.abs(v).toFixed(digits);
-  let lastPalette = -1;
+  function formatZoom() {
+    const zl = zoomLog10();
+    if (zl < 4) { const z = 10 ** zl; return `${z.toFixed(z < 10 ? 2 : 0)}×`; }
+    let ex = Math.floor(zl);
+    let mant = Number((10 ** (zl - ex)).toFixed(2));
+    if (mant >= 10) { mant /= 10; ex += 1; }
+    return `${mant.toFixed(2)}e${ex}×`;
+  }
+  const compact = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n.toLocaleString("en-US");
 
+  let warnText = null;
+  function showWarn(text) { warnText = text; updateHud(); }
+
+  function updateProgress() {
+    const bar = $("progressBar");
+    let f = 0;
+    if (refJob) f = refJob.progress * 0.999;
+    else if (back) f = back.rows / Math.max(H, 1);
+    bar.style.width = `${(f * 100).toFixed(1)}%`;
+    bar.parentElement.style.visibility = refJob || back ? "visible" : "hidden";
+  }
+
+  let lastPalette = -1;
   function updateHud() {
+    updateProgress();
     if (hud.hidden) return;
-    const z = zoomLevel();
-    $("sZoom").textContent = z < 1e4 ? `${z.toFixed(z < 10 ? 2 : 0)}×` : `${z.toExponential(2).replace("e+", "e")}×`;
-    const digits = Math.min(17, Math.max(6, Math.ceil(Math.log10(Math.max(z, 1))) + 5));
-    $("sRe").textContent = fmtSigned(view.x, digits);
-    $("sIm").textContent = fmtSigned(view.y, digits);
+    $("sZoom").textContent = formatZoom();
+    const need = locationDigits();
+    const shown = Math.min(need, 22);
+    const tail = need > shown ? "…" : "";
+    $("sRe").textContent = fixedToDec(view.cx, view.P, shown) + tail;
+    $("sIm").textContent = fixedToDec(view.cy, view.P, shown) + tail;
     const iterNote = Math.abs(settings.iterFactor - 1) < 1e-9 ? "auto" : `auto ×${settings.iterFactor.toFixed(2)}`;
     $("sIter").innerHTML = `${maxIterations().toLocaleString("en-US")} <small>${iterNote}</small>`;
-    $("sFrame").innerHTML = frameMs == null ? "–"
-      : `${frameMs.toFixed(0)} ms <small>${canvas.width}×${canvas.height}</small>`;
 
+    const deep = usesPerturbation(view);
     const pill = $("modePill");
-    if (!dfAvailable) { pill.textContent = "FP32 only"; pill.className = "pill off"; }
-    else if (usesDF()) { pill.textContent = "DF64"; pill.className = "pill df"; }
-    else { pill.textContent = "FP32"; pill.className = "pill"; }
+    pill.textContent = deep ? "Perturbation" : "Direct";
+    pill.className = deep ? "pill deep" : "pill";
+
+    let refHtml;
+    if (!deep) refHtml = "<small>not needed</small>";
+    else if (refJob) refHtml = `computing ${Math.round(refJob.progress * 100)}% <small>${refJob.P} bits</small>`;
+    else if (ref) refHtml = `${compact(ref.len - 1)} it <small>${ref.P} bits${lastRefMs != null ? ` · ${Math.round(lastRefMs)} ms` : ""}</small>`;
+    else refHtml = "–";
+    $("sRef").innerHTML = refHtml;
+
+    let frameHtml;
+    if (back) frameHtml = `rendering ${Math.round((back.rows / Math.max(H, 1)) * 100)}% <small>${W}×${H}</small>`;
+    else if (frameMs != null) frameHtml = `${Math.round(frameMs)} ms <small>${W}×${H}</small>`;
+    else frameHtml = "–";
+    $("sFrame").innerHTML = frameHtml;
 
     const warn = $("warn");
-    const atLimit = view.scale <= minScale() * 1.0001;
-    if (!dfAvailable) {
-      warn.hidden = false;
-      warn.textContent = atLimit
-        ? "Precision limit reached. This browser's GPU compiler breaks double-float maths, so zoom stops near 10⁴."
-        : "This browser's GPU compiler breaks double-float maths, so deep zoom is unavailable. Try another browser.";
-    } else if (atLimit) {
-      warn.hidden = false;
-      warn.textContent = "Precision limit reached (about 10¹²). Going deeper needs perturbation maths.";
-    } else {
-      warn.hidden = true;
-    }
-    if (settings.invert) {
-      warn.hidden = false;
-      warn.textContent = (atLimit || !dfAvailable ? warn.textContent + " " : "") + "Scroll direction inverted (I).";
-    }
+    const notes = [];
+    if (scaleLog2() <= MIN_SCALE_LOG2 + 0.01) notes.push("Deepest zoom reached (about 10¹⁰⁰⁰⁰).");
+    if (settings.invert) notes.push("Scroll direction inverted (I).");
+    if (warnText) notes.push(warnText);
+    warn.hidden = notes.length === 0;
+    warn.textContent = notes.join(" ");
 
     $("btnSmooth").setAttribute("aria-pressed", String(settings.colorMode === 0));
     $("btnBanded").setAttribute("aria-pressed", String(settings.colorMode === 1));
@@ -860,26 +1204,29 @@
   // ---------- context loss ----------
   canvas.addEventListener("webglcontextlost", (e) => {
     e.preventDefault();
-    inFlight = null;
-    $("warn").hidden = false;
-    $("warn").textContent = "The GPU reset (usually a frame that ran too long). Restoring…";
+    chunk = null;
+    back = null;
+    front = null;
+    surfaces = [];
+    showWarn("The GPU reset (usually a frame that ran too long). Restoring…");
   });
   canvas.addEventListener("webglcontextrestored", () => {
     initGL();
-    markDirty();
+    resizeSurfaces();
+    stripRows = 1;
+    warnText = null;
+    bump();
   });
 
   // ---------- start ----------
   try {
     initGL();
   } catch (err) {
-    hud.hidden = true;
-    const msg = document.createElement("div");
-    msg.className = "fatal";
-    msg.textContent = "The fractal shader failed to compile on this GPU: " + err.message;
-    document.body.appendChild(msg);
+    fatal("The fractal shader failed to compile on this GPU: " + err.message);
     return;
   }
-  markDirty();
+  try { resizeObserver.observe(canvas, { box: "device-pixel-content-box" }); }
+  catch { resizeObserver.observe(canvas); }
+  updateHud();
 })();
 </script>

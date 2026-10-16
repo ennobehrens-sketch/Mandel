@@ -50,6 +50,15 @@ Or open `Package.swift` in Xcode and press ⌘R (choose the *Release* scheme for
 
 Double-float has a ~48-bit mantissa. At about 2·10⁻¹⁵ units per pixel (≈10¹² zoom) neighbouring pixels are only a few ulps apart. The image turns noisy there, so the zoom stops and the HUD shows a warning. Going deeper would need perturbation theory.
 
-## Web version
+## Web version (unlimited depth)
 
-`web/index.html` is a single-file WebGL2 port with the same rendering approach. Open it in Safari, Chrome or Firefox, no build step. Browsers have no `fma` and no way to turn off GPU fast-math, so the double-float code multiplies every rounded intermediate by a uniform equal to 1 at runtime, and the page runs a small self-test at startup. If the GPU compiler still breaks the maths, the panel says so and zoom stops at the FP32 limit.
+`web/index.html` is a single-file WebGL2 viewer. Open it in Safari, Chrome or Firefox, no build step. It goes much deeper than the native app:
+
+- **Shallow zoom (pixel size above 1e-5):** plain FP32 iteration, with the cardioid/bulb skip and the periodicity check.
+- **Deep zoom: perturbation theory.** A Web Worker computes one reference orbit at the view centre with `BigInt` fixed-point arithmetic, using about 64 bits more than the pixel size needs. It's uploaded as an `RG32F` texture. Each pixel iterates only its difference from the reference, `dz' = 2·Z·dz + dz² + dc`, in 32-bit floats:
+  - While `dz` is below float range, it's stored as a mantissa vector plus an integer exponent ("rescaled iterations"), so depth has no float limit.
+  - Rebasing (Zhuoran's method) resets `dz` to the full `z` and restarts the reference at 0 whenever `|z| < |dz|` or the reference runs out. One reference per view is enough and glitches are avoided.
+- **Centre and zoom:** the view centre is a `BigInt`, and its precision grows as you zoom. The pixel size is a mantissa plus an exponent. Zoom stops at about 10¹⁰⁰⁰⁰. Past that, a reference orbit (tens of thousands of multiplications on 33 000-bit numbers) takes too long to be useful.
+- **Rendering:** the frame renders in horizontal strips sized from the measured GPU throughput (~30 ms each), which keeps the GPU watchdog away. The last finished image is shown stretched to the current view until the new one completes, so zooming stays fluid even when a deep frame takes seconds.
+
+Known limit: reference values are stored as 32-bit floats. When the view is centred almost exactly on a deep mini-Mandelbrot nucleus, the reference passes closer to 0 than float range allows, and those spots can render inaccurately.
