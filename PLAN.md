@@ -7,7 +7,7 @@
 | Platform | Native macOS app, Swift + Metal |
 | Hardware | Apple Silicon (M1+), macOS 13+ |
 | Project | Swift Package (`swift run -c release`, or open `Package.swift` in Xcode) |
-| Zoom depth | ~10^13 via emulated double precision ("double-float") on the GPU |
+| Zoom depth | ~10^12 (measured limit of double-float; originally targeted 10^13) via emulated double precision on the GPU |
 | Gestures | Two-finger scroll = zoom (anchored at cursor), click-drag = pan |
 | Rendering | Always full Retina resolution, no progressive preview |
 | Colouring | Smooth gradient **and** classic banded, switchable |
